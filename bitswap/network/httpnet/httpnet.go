@@ -39,6 +39,12 @@ var _ network.BitSwapNetwork = (*httpnet)(nil)
 
 type Option func(net *httpnet)
 
+func WithUserAgent(agent string) Option {
+	return func(net *httpnet) {
+		net.userAgent = agent
+	}
+}
+
 type httpnet struct {
 	// NOTE: Stats must be at the top of the heap allocation to ensure 64bit
 	// alignment.
@@ -48,7 +54,8 @@ type httpnet struct {
 	client *http.Client
 
 	// inbound messages from the network are forwarded to the receiver
-	receivers []network.Receiver
+	receivers     []network.Receiver
+	connectEvtMgr *network.ConnectEventManager
 
 	urlLock   sync.RWMutex
 	peerToURL map[peer.ID][]*url.URL
@@ -56,6 +63,8 @@ type httpnet struct {
 
 	latMapLock sync.RWMutex
 	latMap     map[peer.ID]time.Duration
+
+	userAgent string
 }
 
 // New returns a BitSwapNetwork supported by underlying IPFS host.
@@ -91,17 +100,25 @@ func New(host host.Host, opts ...Option) network.BitSwapNetwork {
 	return &net
 }
 
-func (bsnet *httpnet) Start(receivers ...network.Receiver) {
-	bsnet.receivers = receivers
+func (ht *httpnet) Start(receivers ...network.Receiver) {
+	ht.receivers = receivers
+	connectionListeners := make([]network.ConnectionListener, len(receivers))
+	for i, v := range receivers {
+		connectionListeners[i] = v
+	}
+	ht.connectEvtMgr = network.NewConnectEventManager(connectionListeners...)
+
+	ht.connectEvtMgr.Start()
 }
 
-func (bsnet *httpnet) Stop() {
+func (ht *httpnet) Stop() {
+	ht.connectEvtMgr.Stop()
 }
 
-func (bsnet *httpnet) Ping(ctx context.Context, p peer.ID) ping.Result {
+func (ht *httpnet) Ping(ctx context.Context, p peer.ID) ping.Result {
 	log.Debugf("Ping: %s", p)
 
-	pi := bsnet.host.Peerstore().PeerInfo(p)
+	pi := ht.host.Peerstore().PeerInfo(p)
 	urls := network.ExtractURLsFromPeer(pi)
 	if len(urls) == 0 {
 		return ping.Result{
@@ -130,7 +147,7 @@ func (bsnet *httpnet) Ping(ctx context.Context, p peer.ID) ping.Result {
 		}
 	}
 	lat := pinger.Statistics().AvgRtt
-	bsnet.recordLatency(p, lat)
+	ht.recordLatency(p, lat)
 	return ping.Result{
 		RTT:   lat,
 		Error: nil,
@@ -139,46 +156,46 @@ func (bsnet *httpnet) Ping(ctx context.Context, p peer.ID) ping.Result {
 }
 
 // TODO
-func (bsnet *httpnet) Latency(p peer.ID) time.Duration {
+func (ht *httpnet) Latency(p peer.ID) time.Duration {
 	var lat time.Duration
-	bsnet.latMapLock.RLock()
+	ht.latMapLock.RLock()
 	{
-		lat = bsnet.latMap[p]
+		lat = ht.latMap[p]
 	}
-	bsnet.latMapLock.RUnlock()
+	ht.latMapLock.RUnlock()
 
 	// Add one more latency measurement every time latency is requested
 	// since we don't do it from anywhere else.
 	// FIXME: too much too often?
 	go func() {
-		bsnet.Ping(context.Background(), p)
+		ht.Ping(context.Background(), p)
 	}()
 
 	return lat
 }
 
 // similar to LatencyIWMA from peerstore.
-func (bsnet *httpnet) recordLatency(p peer.ID, next time.Duration) {
+func (ht *httpnet) recordLatency(p peer.ID, next time.Duration) {
 	nextf := float64(next)
 	s := 0.1
-	bsnet.latMapLock.Lock()
+	ht.latMapLock.Lock()
 	{
-		ewma, found := bsnet.latMap[p]
+		ewma, found := ht.latMap[p]
 		ewmaf := float64(ewma)
 		if !found {
-			bsnet.latMap[p] = next // when no data, just take it as the mean.
+			ht.latMap[p] = next // when no data, just take it as the mean.
 		} else {
 			nextf = ((1.0 - s) * ewmaf) + (s * nextf)
-			bsnet.latMap[p] = time.Duration(nextf)
+			ht.latMap[p] = time.Duration(nextf)
 		}
 	}
-	bsnet.latMapLock.Unlock()
+	ht.latMapLock.Unlock()
 }
 
-func (bsnet *httpnet) SendMessage(ctx context.Context, p peer.ID, msg bsmsg.BitSwapMessage) error {
+func (ht *httpnet) SendMessage(ctx context.Context, p peer.ID, msg bsmsg.BitSwapMessage) error {
 	log.Debugf("SendMessage: %s. %s", p, msg)
 	// todo opts
-	sender, err := bsnet.NewMessageSender(ctx, p, nil)
+	sender, err := ht.NewMessageSender(ctx, p, nil)
 	if err != nil {
 		return err
 	}
@@ -186,48 +203,48 @@ func (bsnet *httpnet) SendMessage(ctx context.Context, p peer.ID, msg bsmsg.BitS
 	return sender.SendMsg(ctx, msg)
 }
 
-func (bsnet *httpnet) Self() peer.ID {
-	return bsnet.host.ID()
+func (ht *httpnet) Self() peer.ID {
+	return ht.host.ID()
 }
 
-func (bsnet *httpnet) Connect(ctx context.Context, p peer.AddrInfo) error {
+func (ht *httpnet) Connect(ctx context.Context, p peer.AddrInfo) error {
 	log.Debugf("Connect: %s", p)
 	htaddrs, _ := network.SplitHTTPAddrs(p)
 	if len(htaddrs.Addrs) == 0 {
 		return nil
 	}
-	bsnet.host.Peerstore().AddAddrs(p.ID, htaddrs.Addrs, peerstore.PermanentAddrTTL)
-	for _, r := range bsnet.receivers {
+	ht.host.Peerstore().AddAddrs(p.ID, htaddrs.Addrs, peerstore.PermanentAddrTTL)
+	for _, r := range ht.receivers {
 		r.PeerConnected(p.ID)
 	}
 	return nil
 }
 
-func (bsnet *httpnet) DisconnectFrom(ctx context.Context, p peer.ID) error {
+func (ht *httpnet) DisconnectFrom(ctx context.Context, p peer.ID) error {
 	return nil
 }
 
-func (bsnet *httpnet) Stats() network.Stats {
+func (ht *httpnet) Stats() network.Stats {
 	return network.Stats{
-		MessagesRecvd: atomic.LoadUint64(&bsnet.stats.MessagesRecvd),
-		MessagesSent:  atomic.LoadUint64(&bsnet.stats.MessagesSent),
+		MessagesRecvd: atomic.LoadUint64(&ht.stats.MessagesRecvd),
+		MessagesSent:  atomic.LoadUint64(&ht.stats.MessagesSent),
 	}
 }
 
-func (nbsnet *httpnet) TagPeer(p peer.ID, tag string, w int) {
+func (ht *httpnet) TagPeer(p peer.ID, tag string, w int) {
 }
-func (bsnet *httpnet) UntagPeer(p peer.ID, tag string) {
+func (ht *httpnet) UntagPeer(p peer.ID, tag string) {
 }
 
-func (bsnet *httpnet) Protect(p peer.ID, tag string) {
+func (ht *httpnet) Protect(p peer.ID, tag string) {
 }
-func (bsnet *httpnet) Unprotect(p peer.ID, tag string) bool {
+func (ht *httpnet) Unprotect(p peer.ID, tag string) bool {
 	return false
 }
 
-func (bsnet *httpnet) NewMessageSender(ctx context.Context, p peer.ID, opts *network.MessageSenderOpts) (network.MessageSender, error) {
+func (ht *httpnet) NewMessageSender(ctx context.Context, p peer.ID, opts *network.MessageSenderOpts) (network.MessageSender, error) {
 	log.Debugf("NewMessageSender: %s", p)
-	pi := bsnet.host.Peerstore().PeerInfo(p)
+	pi := ht.host.Peerstore().PeerInfo(p)
 	urls := network.ExtractURLsFromPeer(pi)
 	if len(urls) == 0 {
 		return nil, ErrNoHTTPAddresses
@@ -237,8 +254,8 @@ func (bsnet *httpnet) NewMessageSender(ctx context.Context, p peer.ID, opts *net
 		// ctx ??
 		peer:      p,
 		urls:      urls,
-		client:    bsnet.client,
-		receivers: bsnet.receivers,
+		client:    ht.client,
+		receivers: ht.receivers,
 		closing:   make(chan struct{}, 1),
 		// opts: todo
 	}, nil
@@ -273,7 +290,7 @@ func (sender *httpMsgSender) SendMsg(ctx context.Context, msg bsmsg.BitSwapMessa
 	}
 
 	sendURL, _ := url.Parse(sender.urls[0].String())
-	sendURL.RawQuery = "format=raw&dag-scope=block"
+	sendURL.RawQuery = "format=raw"
 
 	// TODO: assuming we don't have to manage making concurrent
 	// requests here.

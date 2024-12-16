@@ -21,7 +21,7 @@ func ExtractHTTPAddress(ma multiaddr.Multiaddr) (*url.URL, error) {
 				return nil, fmt.Errorf("failed to extract host: %w", err)
 			}
 			host = hostVal
-		case "tcp":
+		case "tcp", "udp":
 			portVal, err := ma.ValueForProtocol(comp.Code)
 			if err != nil {
 				return nil, fmt.Errorf("failed to extract port: %w", err)

@@ -1,4 +1,4 @@
-package network
+package bsnet
 
 import (
 	"context"
@@ -23,7 +23,7 @@ import (
 	"github.com/multiformats/go-multistream"
 )
 
-var log = logging.Logger("bitswap/network")
+var log = logging.Logger("bitswap/bsnet")
 
 var (
 	maxSendTimeout = 2 * time.Minute
@@ -69,7 +69,7 @@ type impl struct {
 	stats iface.Stats
 
 	host          host.Host
-	connectEvtMgr *connectEventManager
+	connectEvtMgr *iface.ConnectEventManager
 
 	protocolBitswapNoVers  protocol.ID
 	protocolBitswapOneZero protocol.ID
@@ -389,11 +389,11 @@ func (bsnet *impl) newStreamToPeer(ctx context.Context, p peer.ID) (network.Stre
 func (bsnet *impl) Start(r ...iface.Receiver) {
 	bsnet.receivers = r
 	{
-		connectionListeners := make([]ConnectionListener, len(r))
+		connectionListeners := make([]iface.ConnectionListener, len(r))
 		for i, v := range r {
 			connectionListeners[i] = v
 		}
-		bsnet.connectEvtMgr = newConnectEventManager(connectionListeners...)
+		bsnet.connectEvtMgr = iface.NewConnectEventManager(connectionListeners...)
 	}
 	for _, proto := range bsnet.supportedProtocols {
 		bsnet.host.SetStreamHandler(proto, bsnet.handleNewStream)

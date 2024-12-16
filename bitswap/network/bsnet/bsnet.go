@@ -1,4 +1,4 @@
-package network
+package bsnet
 
 import "github.com/ipfs/boxo/bitswap/network/bsnet/internal"
 
