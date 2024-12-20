@@ -49,7 +49,6 @@ func (rt *router) Ping(ctx context.Context, p peer.ID) ping.Result {
 	return rt.Bitswap.Ping(ctx, p)
 }
 
-// TODO
 func (rt *router) Latency(p peer.ID) time.Duration {
 	pi := rt.Peerstore.PeerInfo(p)
 	htaddrs, _ := SplitHTTPAddrs(pi)
@@ -60,17 +59,20 @@ func (rt *router) Latency(p peer.ID) time.Duration {
 }
 
 func (rt *router) SendMessage(ctx context.Context, p peer.ID, msg bsmsg.BitSwapMessage) error {
-	return multierr.Combine(
-		rt.HTTP.SendMessage(ctx, p, msg),
-		rt.Bitswap.SendMessage(ctx, p, msg),
-	)
+	// SendMessage is only used by bitswap server so we send a bitswap
+	// message.
+	return rt.Bitswap.SendMessage(ctx, p, msg)
 }
 
+// Connect attempts to connect to a peer. It prioritizes HTTP connections over
+// bitswap.
 func (rt *router) Connect(ctx context.Context, p peer.AddrInfo) error {
-	return multierr.Combine(
-		rt.HTTP.Connect(ctx, p),
-		rt.Bitswap.Connect(ctx, p),
-	)
+	htaddrs, _ := SplitHTTPAddrs(p)
+	if len(htaddrs.Addrs) > 0 {
+		return rt.HTTP.Connect(ctx, p)
+	} else {
+		return rt.Bitswap.Connect(ctx, p)
+	}
 }
 
 func (rt *router) DisconnectFrom(ctx context.Context, p peer.ID) error {
@@ -89,6 +91,8 @@ func (rt *router) Stats() Stats {
 	}
 }
 
+// NewMessageSender returns a MessageSender using the HTTP network when HTTP
+// addresses are knwon, and bitswap otherwise.
 func (rt *router) NewMessageSender(ctx context.Context, p peer.ID, opts *MessageSenderOpts) (MessageSender, error) {
 	pi := rt.Peerstore.PeerInfo(p)
 	htaddrs, _ := SplitHTTPAddrs(pi)
@@ -102,6 +106,7 @@ func (rt *router) TagPeer(p peer.ID, tag string, w int) {
 	rt.HTTP.TagPeer(p, tag, w)
 	rt.Bitswap.TagPeer(p, tag, w)
 }
+
 func (rt *router) UntagPeer(p peer.ID, tag string) {
 	rt.HTTP.UntagPeer(p, tag)
 	rt.Bitswap.UntagPeer(p, tag)
@@ -112,5 +117,5 @@ func (rt *router) Protect(p peer.ID, tag string) {
 	rt.Bitswap.Protect(p, tag)
 }
 func (rt *router) Unprotect(p peer.ID, tag string) bool {
-	return rt.HTTP.Unprotect(p, tag) || rt.Bitswap.Unprotect(p, tag) // FIXME
+	return rt.HTTP.Unprotect(p, tag) || rt.Bitswap.Unprotect(p, tag)
 }
