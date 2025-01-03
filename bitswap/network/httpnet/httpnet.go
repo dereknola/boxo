@@ -194,6 +194,7 @@ func New(host host.Host, opts ...Option) network.BitSwapNetwork {
 }
 
 func (ht *httpnet) Start(receivers ...network.Receiver) {
+	fmt.Println("START HTTP NET")
 	ht.receivers = receivers
 	connectionListeners := make([]network.ConnectionListener, len(receivers))
 	for i, v := range receivers {
@@ -209,9 +210,8 @@ func (ht *httpnet) Stop() {
 	ht.connEvtMgr.Stop()
 }
 
+// Ping
 func (ht *httpnet) Ping(ctx context.Context, p peer.ID) ping.Result {
-	log.Debugf("Ping: %s", p)
-
 	pi := ht.host.Peerstore().PeerInfo(p)
 	urls := network.ExtractURLsFromPeer(pi)
 	if len(urls) == 0 {
@@ -220,12 +220,16 @@ func (ht *httpnet) Ping(ctx context.Context, p peer.ID) ping.Result {
 		}
 	}
 
+	log.Debugf("Ping: %s", p)
+
 	// pick the first one. In general there should not be more than one
 	// url per peer. FIXME: right?
-	pingURL := urls[0]
+	// Remove port from url.
+	pingURLHost := strings.Split(urls[0].Host, ":")[0]
 
-	pinger, err := probing.NewPinger(pingURL.Host)
+	pinger, err := probing.NewPinger(pingURLHost)
 	if err != nil {
+		log.Debug("pinger error ", err)
 		return ping.Result{
 			RTT:   0,
 			Error: err,
@@ -235,6 +239,7 @@ func (ht *httpnet) Ping(ctx context.Context, p peer.ID) ping.Result {
 
 	err = pinger.RunWithContext(ctx)
 	if err != nil {
+		log.Debug("ping error ", err)
 		return ping.Result{
 			RTT:   0,
 			Error: err,
@@ -242,6 +247,7 @@ func (ht *httpnet) Ping(ctx context.Context, p peer.ID) ping.Result {
 	}
 	lat := pinger.Statistics().AvgRtt
 	ht.recordLatency(p, lat)
+	log.Debugf("ping latency %s %s", p, lat)
 	return ping.Result{
 		RTT:   lat,
 		Error: nil,
@@ -300,6 +306,7 @@ func (ht *httpnet) isInCooldown(u *url.URL) bool {
 		ht.cooldownURLsLock.Unlock()
 		return false
 	}
+	log.Debugf("%s is in cooldown until %s", u, dl)
 	return true
 }
 
@@ -310,7 +317,7 @@ func (ht *httpnet) setCooldownDuration(u *url.URL, d time.Duration) {
 }
 
 func (ht *httpnet) SendMessage(ctx context.Context, p peer.ID, msg bsmsg.BitSwapMessage) error {
-	log.Debugf("SendMessage: %s. %s", p, msg)
+	log.Debugf("SendMessage: %s", p)
 	// todo opts
 	sender, err := ht.NewMessageSender(ctx, p, nil)
 	if err != nil {
@@ -325,11 +332,11 @@ func (ht *httpnet) Self() peer.ID {
 }
 
 func (ht *httpnet) Connect(ctx context.Context, p peer.AddrInfo) error {
-	log.Debugf("Connect: %s", p)
 	htaddrs, _ := network.SplitHTTPAddrs(p)
 	if len(htaddrs.Addrs) == 0 {
 		return nil
 	}
+	log.Debugf("connect to %s", p)
 	ht.host.Peerstore().AddAddrs(p.ID, htaddrs.Addrs, peerstore.PermanentAddrTTL)
 	urls := network.ExtractURLsFromPeer(htaddrs)
 	rand.Shuffle(len(urls), func(i, j int) {
@@ -350,6 +357,11 @@ func (ht *httpnet) Connect(ctx context.Context, p peer.AddrInfo) error {
 		log.Debugf("connect request to %s", req.URL)
 		_, err = ht.client.Do(req)
 		if err != nil {
+			log.Debugf("connect error %s", err)
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				// abort when context cancelled
+				return ctxErr
+			}
 			continue
 		}
 		return nil
@@ -493,6 +505,9 @@ func (sender *httpMsgSender) SendMsg(ctx context.Context, msg bsmsg.BitSwapMessa
 		if err != nil {
 			log.Debug(err)
 			merr = multierr.Append(merr, err)
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return ctxErr
+			}
 			continue // with next url
 		}
 		// Store original path in case the "/ipfs/..." url is mounted
